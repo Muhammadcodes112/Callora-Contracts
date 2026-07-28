@@ -10,34 +10,10 @@
 //!   `authorized_caller` or single-key admin draining the vault in one
 //!   transaction.
 //!
-//! Soroban contracts hold a single on-ledger token balance; there is no
-//! native concept of separate "hot" and "cold" token accounts within one
-//! contract. This module therefore implements the split as an **accounting
-//! partition** of `VaultMeta.balance`: `hot + cold` must always equal the
-//! vault's total tracked balance. This invariant is enforced by every
-//! function in this module and verified by property tests in `test.rs`.
-//!
-//! ## Auto-rebalance
-//!
-//! On every deposit, the hot pool is checked against the configured target
-//! ratio (`hot_bps`, out of 10_000). If the hot pool's share of the total
-//! balance drifts beyond `rebalance_threshold_bps` from the target, excess
-//! funds are automatically moved from hot to cold (deposits only ever push
-//! funds *toward* cold, never pull cold funds back into hot — that requires
-//! an explicit, authorized cold-sweep-to-hot action).
-//!
-//! ## Multisig cold sweep
-//!
-//! Moving funds out of the cold pool requires a two-step propose/approve
-//! flow:
-//!
-//! 1. Any configured cold signer calls `propose_cold_sweep` with an amount
-//!    and destination, creating a `PendingColdSweep` and casting the
-//!    proposer's own approval.
-//! 2. Other cold signers call `approve_cold_sweep` to add their approval.
-//! 3. Once approvals reach `cold_threshold` (N-of-M), the sweep executes
-//!    automatically on the approval that crosses the threshold — no
-//!    separate "execute" call is needed, eliminating a TOCTOU window
+//! This module is implemented but not yet wired into the public contract API.
+//! Items are marked `#[allow(dead_code)]` to prevent warnings during the
+//! incremental integration phase.
+#![allow(dead_code)]
 //!    between the last approval and execution.
 //!
 //! Only one cold sweep may be pending at a time per vault.

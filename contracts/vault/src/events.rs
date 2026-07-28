@@ -3,6 +3,12 @@
 //! This module centralizes all event topic strings into dedicated functions,
 //! ensuring byte-identity is preserved and preventing accidental topic name drift
 //! across call sites.
+//!
+//! Many symbols in this module correspond to entrypoints that exist in the full
+//! vault API but are not yet wired in the current simplified `lib.rs`. They are
+//! kept here so off-chain indexers that subscribe to the `"vault"` event stream
+//! receive stable symbol bytes when those entrypoints are added.
+#![allow(dead_code)]
 
 use soroban_sdk::{Env, Symbol};
 

@@ -135,4 +135,12 @@ pub enum VaultError {
     DuplicateColdSigner = 42,
     /// Deposit would exceed the configured reserve cap (code 43).
     ExceedsReserveCap = 43,
+    /// No pending timelock proposal for the requested action (code 44).
+    ProposalNotFound = 44,
+    /// Action attempted before the timelock window has elapsed (code 45).
+    TimelockNotExpired = 45,
+    /// `proposed_at + window` overflowed `u64` (code 46).
+    TimelockOverflow = 46,
+    /// Proposed timelock window is outside the allowed `MIN..=MAX` bounds (code 47).
+    InvalidTimelockWindow = 47,
 }

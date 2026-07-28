@@ -19,9 +19,9 @@
 //! does not bump TTL, and reads only `meta.balance` plus the on-ledger USDC
 //! balance.
 
-use soroban_sdk::{contractimpl, contracttype, token, Address, Env};
+use soroban_sdk::{contracttype, token, Address, Env};
 
-use crate::{CalloraVault, CalloraVaultArgs, CalloraVaultClient, StorageKey, VaultError};
+use crate::VaultError;
 
 /// Structured result of [`CalloraVault::dry_run_sweep_idle_balance`].
 ///
@@ -48,52 +48,35 @@ pub struct SweepPreview {
     pub has_idle: bool,
 }
 
-#[contractimpl]
-impl CalloraVault {
-    /// Read-only preview of the amount of untracked on-ledger USDC that a
-    /// sweep (`distribute` called with the returned `idle_balance`) would
-    /// move.
-    ///
-    /// # Returns
-    /// A [`SweepPreview`] populated from the vault's tracked balance and the
-    /// USDC token contract's view of the vault address's on-ledger holdings.
-    ///
-    /// # Errors
-    /// - [`VaultError::NotInitialized`] — `init` has not been called, so
-    ///   neither `meta` nor `UsdcToken` is set.
-    ///
-    /// # Side effects
-    /// None. This function does not write storage, does not require auth, and
-    /// does not bump TTL on any key. It performs one cross-contract `balance`
-    /// call to the configured USDC token contract.
-    pub fn dry_run_sweep_idle_balance(env: Env) -> Result<SweepPreview, VaultError> {
-        let tracked_balance: i128 = env
-            .storage()
-            .instance()
-            .get(&crate::DataKey::Balance)
-            .unwrap_or(0);
-        let usdc_addr: Address = env
-            .storage()
-            .instance()
-            .get(&crate::DataKey::UsdcToken)
-            .ok_or(VaultError::NotInitialized)?;
-        let usdc = token::Client::new(&env, &usdc_addr);
-        let on_ledger = usdc.balance(&env.current_contract_address());
+/// Compute the idle (untracked) on-ledger USDC balance for the vault.
+///
+/// Called by [`crate::CalloraVault::dry_run_sweep_idle_balance`]; extracted
+/// here so it can be tested in isolation without the full contract impl.
+pub fn compute_sweep_preview(env: &Env) -> Result<SweepPreview, VaultError> {
+    let tracked_balance: i128 = env
+        .storage()
+        .instance()
+        .get(&crate::DataKey::Balance)
+        .unwrap_or(0);
+    let usdc_addr: Address = env
+        .storage()
+        .instance()
+        .get(&crate::DataKey::UsdcToken)
+        .ok_or(VaultError::NotInitialized)?;
+    let usdc = token::Client::new(env, &usdc_addr);
+    let on_ledger = usdc.balance(&env.current_contract_address());
 
-        // Defensive: if the tracked balance somehow exceeds on-ledger USDC
-        // (e.g. a prior accounting bug), saturate at zero rather than reporting
-        // a negative idle balance or panicking on a `checked_sub` failure.
-        let idle = if on_ledger > tracked_balance {
-            on_ledger - tracked_balance
-        } else {
-            0
-        };
+    // Defensive: saturate at zero rather than reporting a negative idle balance.
+    let idle = if on_ledger > tracked_balance {
+        on_ledger - tracked_balance
+    } else {
+        0
+    };
 
-        Ok(SweepPreview {
-            on_ledger_balance: on_ledger,
-            tracked_balance,
-            idle_balance: idle,
-            has_idle: idle > 0,
-        })
-    }
+    Ok(SweepPreview {
+        on_ledger_balance: on_ledger,
+        tracked_balance,
+        idle_balance: idle,
+        has_idle: idle > 0,
+    })
 }

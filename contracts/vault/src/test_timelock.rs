@@ -35,9 +35,19 @@ fn setup(env: &Env) -> (Address, CalloraVaultClient<'_>, Address, Address, Addre
     let (usdc, _) = create_usdc(env, &owner);
     let admin = Address::generate(env);
     let recipient = Address::generate(env);
+    let settlement = Address::generate(env);
     env.mock_all_auths();
     // Owner is initial admin by default (lib.rs::init sets Admin = owner).
-    client.init(&owner, &usdc, &None, &None, &None, &None, &None);
+    client.init(
+        &owner,
+        &usdc,
+        &0i128,       // initial_balance
+        &owner,       // authorized_caller (owner)
+        &1i128,       // min_deposit
+        &None,        // revenue_pool
+        &1000i128,    // max_deduct
+        &settlement,  // settlement
+    );
     // Rotate admin to a distinct address so admin != owner for auth tests.
     client.set_admin(&owner, &admin);
     client.accept_admin();

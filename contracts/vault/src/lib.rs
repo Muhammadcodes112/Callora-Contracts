@@ -48,104 +48,101 @@
 /// persistent, they do not silently archive. To prevent state bloat, an owner
 /// can explicitly prune old markers using `prune_processed_requests`.
 use soroban_sdk::{
-    contract, contractclient, contractimpl, contracttype, token, Address, BytesN, Env, String,
-    Symbol, Vec,
+    contract, contractimpl, contracttype, Address, BytesN, Env, Symbol, Vec,
 };
+use soroban_sdk::token as token_client;
 
 pub mod views;
 
-mod errors;
-pub use errors::VaultError;
+mod events;
+
+// ---------------------------------------------------------------------------
+// Structured event payload types
+// ---------------------------------------------------------------------------
+
+/// Data payload emitted with the `"init"` event.
+///
+/// Carries the full vault configuration at initialization time so indexers
+/// can reconstruct initial state without querying storage.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct InitPayload {
+    /// Vault owner — the address that controls deposits and withdrawals.
+    pub owner: Address,
+    /// USDC token contract address used for all fund transfers.
+    pub usdc_token: Address,
+    /// Balance pre-credited to the vault at initialization (may be 0).
+    pub initial_balance: i128,
+    /// Minimum per-deposit amount enforced by the vault.
+    pub min_deposit: i128,
+    /// Maximum per-deduct amount enforced by the vault.
+    pub max_deduct: i128,
+    /// Settlement contract that receives USDC on every `deduct` call.
+    pub settlement: Address,
+}
+
+/// Data payload emitted with the `"deposit"` event.
+///
+/// Records the deposited amount and the vault's new tracked balance so
+/// indexers can verify accounting consistency without a separate storage read.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct DepositPayload {
+    /// Amount of USDC deposited in this call (base units).
+    pub amount: i128,
+    /// Vault tracked balance after the deposit has been applied.
+    pub balance_after: i128,
+}
+
+/// Data payload emitted with the `"deduct"` event (single deduct).
+///
+/// Bundles the deducted amount, the caller-supplied idempotency key, the
+/// resulting vault balance, and the on-chain destination so indexers can
+/// reconcile settlement credits without joining additional event streams.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct DeductPayload {
+    /// Amount of USDC deducted and transferred to `destination`.
+    pub amount: i128,
+    /// Caller-supplied idempotency key for this deduction.
+    pub request_id: u64,
+    /// Vault tracked balance after the deduction has been applied.
+    pub balance_after: i128,
+    /// Address that received the deducted USDC (the settlement contract).
+    pub destination: Address,
+}
+
+/// Data payload emitted with the `"deduct"` event (batch deduct).
+///
+/// Summarises a batch as a single aggregate event rather than per-item events
+/// to keep gas costs proportional to batch size only at the token-transfer
+/// layer, not the event layer.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct BatchDeductPayload {
+    /// Sum of all deducted amounts across all items in the batch.
+    pub total_amount: i128,
+    /// Number of items in the batch.
+    pub item_count: u32,
+    /// Vault tracked balance after all deductions have been applied.
+    pub balance_after: i128,
+    /// Address that received the deducted USDC (the settlement contract).
+    pub destination: Address,
+}
 
 /// Typed error codes for the Callora Vault contract.
 ///
 /// These error codes are returned instead of string panics to enable
 /// machine-readable error handling by integrators using @stellar/stellar-sdk.
-#[contracterror]
-#[repr(u32)]
-#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
-pub enum VaultError {
-    /// Vault has not been initialized yet (code 1).
-    NotInitialized = 1,
-    /// Vault has already been initialized (code 2).
-    AlreadyInitialized = 2,
-    /// Caller is not authorized for this operation (code 3).
-    Unauthorized = 3,
-    /// Vault is currently paused (code 4).
-    Paused = 4,
-    /// Insufficient balance for the requested operation (code 5).
-    InsufficientBalance = 5,
-    /// Amount must be positive (code 6).
-    AmountNotPositive = 6,
-    /// Deduct amount exceeds the configured maximum (code 7).
-    ExceedsMaxDeduct = 7,
-    /// Deposit amount is below the configured minimum (code 8).
-    BelowMinDeposit = 8,
-    /// Arithmetic overflow detected (code 9).
-    Overflow = 9,
-    /// Initial balance must be non-negative (code 10).
-    InitialBalanceNegative = 10,
-    /// Min deposit must be positive (code 11).
-    MinDepositNotPositive = 11,
-    /// Max deduct must be positive (code 12).
-    MaxDeductNotPositive = 12,
-    /// Min deposit cannot exceed max deduct (code 13).
-    MinDepositExceedsMaxDeduct = 13,
-    /// USDC token address cannot be the vault address (code 14).
-    UsdcTokenCannotBeVault = 14,
-    /// Revenue pool address cannot be the vault address (code 15).
-    RevenuePoolCannotBeVault = 15,
-    /// Authorized caller address cannot be the vault address (code 16).
-    AuthorizedCallerCannotBeVault = 16,
-    /// Initial balance exceeds on-ledger USDC balance (code 17).
-    InitialBalanceExceedsOnLedger = 17,
-    /// Vault is already paused (code 18).
-    AlreadyPaused = 18,
-    /// Vault is not paused (code 19).
-    NotPaused = 19,
-    /// Settlement address has not been configured (code 20).
-    SettlementNotSet = 20,
-    /// Batch deduct requires at least one item (code 21).
-    BatchEmpty = 21,
-    /// Batch size exceeds maximum allowed (code 22).
-    BatchTooLarge = 22,
-    /// New owner must be different from current owner (code 23).
-    NewOwnerSameAsCurrent = 23,
-    /// No ownership transfer is pending (code 24).
-    NoOwnershipTransferPending = 24,
-    /// No admin transfer is pending (code 25).
-    NoAdminTransferPending = 25,
-    /// Offering ID exceeds maximum length (code 26).
-    OfferingIdTooLong = 26,
-    /// Metadata exceeds maximum length (code 27).
-    MetadataTooLong = 27,
-    /// Price parsing error or non‑positive price (code 28).
-    PriceParseError = 28,
-    /// Duplicate request ID detected (code 29).
-    DuplicateRequestId = 29,
-    /// Offering ID is empty or contains invalid characters (code 30).
-    OfferingIdInvalid = 30,
-    /// Metadata string is empty or contains invalid characters (code 31).
-    MetadataInvalid = 31,
-    /// Supplied nonce does not match the stored authorized-caller rotation nonce (code 30).
-    StaleNonce = 32,
-    /// New revenue pool must be different from current revenue pool (code 33).
-    NewRevenuePoolSameAsCurrent = 33,
-    /// No revenue pool transfer is pending (code 34).
-    NoRevenuePoolTransferPending = 34,
-    /// Calculated fee in basis points exceeds the caller-supplied `max_fee_bps` limit (code 35).
-    Slippage = 35,
-    /// Rate limit exceeded for the developer (code 36).
-    RateLimited = 36,
-    /// No pending timelock proposal for the requested action (code 37).
-    ProposalNotFound = 37,
-    /// Action attempted before the timelock window has elapsed (code 38).
-    TimelockNotExpired = 38,
-    /// `proposed_at + window` overflowed `u64` (code 39).
-    TimelockOverflow = 39,
-    /// Proposed timelock window is outside the allowed `MIN..=MAX` bounds (code 40).
-    InvalidTimelockWindow = 40,
-}
+// NOTE: `VaultError` is defined in `errors.rs` and re-exported via `pub use`
+// at the end of the module declarations. The inline definition was removed to
+// avoid duplication and keep the error table in one canonical location.
+
+// TTL constants shared with `limits.rs` and other modules.
+/// Bump TTL when fewer than ~30 days of remaining lifetime.
+pub const INSTANCE_BUMP_THRESHOLD: u32 = 17_280 * 30;
+/// Extend TTL to ~60 days on each bump.
+pub const INSTANCE_BUMP_AMOUNT: u32 = 17_280 * 60;
 
 #[contracttype]
 #[derive(Clone)]
@@ -187,9 +184,6 @@ pub enum StorageKey {
     ContractVersion,
 }
 
-pub mod token {
-    pub use soroban_sdk::token::Client;
-}
 
 #[cfg(target_arch = "wasm32")]
 pub mod settlement {
@@ -295,6 +289,20 @@ impl CalloraVault {
         env.storage().instance().set(&DataKey::Paused, &false);
         // Admin defaults to owner at initialization.
         env.storage().instance().set(&StorageKey::Admin, &owner);
+
+        // Emit structured `init` event so indexers can bootstrap vault state
+        // without replaying every subsequent mutation.
+        env.events().publish(
+            (events::event_init(&env), owner.clone()),
+            InitPayload {
+                owner,
+                usdc_token,
+                initial_balance,
+                min_deposit,
+                max_deduct,
+                settlement,
+            },
+        );
     }
 
     pub fn deposit(env: Env, caller: Address, amount: i128) {
@@ -340,8 +348,16 @@ impl CalloraVault {
             .instance()
             .get::<_, Address>(&DataKey::UsdcToken)
             .unwrap();
-        let token_client = token::Client::new(&env, &token_addr);
+        let token_client = token_client::Client::new(&env, &token_addr);
         token_client.transfer(&caller, &env.current_contract_address(), &amount);
+
+        env.events().publish(
+            (events::event_deposit(&env), caller),
+            DepositPayload {
+                amount,
+                balance_after: new_bal,
+            },
+        );
     }
 
     pub fn deduct(env: Env, caller: Address, amount: i128, request_id: u64) {
@@ -389,7 +405,7 @@ impl CalloraVault {
             .instance()
             .get::<_, Address>(&DataKey::UsdcToken)
             .unwrap();
-        let usdc = token::Client::new(&env, &usdc_addr);
+        let usdc = token_client::Client::new(&env, &usdc_addr);
         let settlement_addr = env
             .storage()
             .instance()
@@ -398,6 +414,16 @@ impl CalloraVault {
         usdc.transfer(&env.current_contract_address(), &settlement_addr, &amount);
         let settlement_client = settlement::Client::new(&env, &settlement_addr);
         settlement_client.record_deduction(&amount, &request_id);
+
+        env.events().publish(
+            (events::event_deduct(&env), caller),
+            DeductPayload {
+                amount,
+                request_id,
+                balance_after: new_bal,
+                destination: settlement_addr,
+            },
+        );
     }
 
     pub fn batch_deduct(env: Env, caller: Address, items: Vec<(i128, u64)>) {
@@ -450,7 +476,7 @@ impl CalloraVault {
             .instance()
             .get::<_, Address>(&DataKey::UsdcToken)
             .unwrap();
-        let usdc = token::Client::new(&env, &usdc_addr);
+        let usdc = token_client::Client::new(&env, &usdc_addr);
         let settlement_addr = env
             .storage()
             .instance()
@@ -466,6 +492,16 @@ impl CalloraVault {
             let (amount, request_id) = item;
             settlement_client.record_deduction(&amount, &request_id);
         }
+
+        env.events().publish(
+            (events::event_deduct(&env), caller),
+            BatchDeductPayload {
+                total_amount,
+                item_count: items.len(),
+                balance_after: new_bal,
+                destination: settlement_addr,
+            },
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -570,6 +606,11 @@ impl CalloraVault {
         env.storage()
             .instance()
             .set(&DataKey::AuthorizedCaller, &caller);
+
+        env.events().publish(
+            (events::event_set_authorized_caller(&env), caller.clone()),
+            caller,
+        );
     }
 
     pub fn pause(env: Env, caller: Address) {
@@ -583,6 +624,9 @@ impl CalloraVault {
             panic!("Not owner");
         }
         env.storage().instance().set(&DataKey::Paused, &true);
+
+        env.events()
+            .publish((events::event_vault_paused(&env), caller), ());
     }
 
     pub fn unpause(env: Env, caller: Address) {
@@ -596,6 +640,9 @@ impl CalloraVault {
             panic!("Not owner");
         }
         env.storage().instance().set(&DataKey::Paused, &false);
+
+        env.events()
+            .publish((events::event_vault_unpaused(&env), caller), ());
     }
 
     pub fn is_paused(env: Env) -> bool {
@@ -653,6 +700,11 @@ impl CalloraVault {
         env.storage()
             .instance()
             .set(&DataKey::MaxDeduct, &max_deduct);
+
+        env.events().publish(
+            (events::event_set_max_deduct(&env), caller),
+            max_deduct,
+        );
     }
 
     pub fn get_settlement(env: Env) -> Address {
@@ -675,6 +727,11 @@ impl CalloraVault {
         env.storage()
             .instance()
             .set(&DataKey::Settlement, &settlement);
+
+        env.events().publish(
+            (events::event_set_settlement(&env), caller),
+            settlement,
+        );
     }
     pub fn get_revenue_pool(env: Env) -> Option<Address> {
         env.storage()
@@ -806,6 +863,15 @@ impl CalloraVault {
         env.storage()
             .instance()
             .set(&StorageKey::PendingAdmin, &new_admin);
+
+        env.events().publish(
+            (
+                events::event_admin_nominated(&env),
+                caller,
+                new_admin.clone(),
+            ),
+            new_admin,
+        );
         Ok(())
     }
 
@@ -822,12 +888,22 @@ impl CalloraVault {
             .get(&StorageKey::PendingAdmin)
             .ok_or(VaultError::NoAdminTransferPending)?;
         new_admin.require_auth();
+        let old_admin = Self::get_admin(env.clone())?;
         env.storage()
             .instance()
             .set(&StorageKey::Admin, &new_admin);
         env.storage()
             .instance()
             .remove(&StorageKey::PendingAdmin);
+
+        env.events().publish(
+            (
+                events::event_admin_accepted(&env),
+                old_admin,
+                new_admin.clone(),
+            ),
+            new_admin,
+        );
         Ok(())
     }
 
@@ -882,7 +958,7 @@ impl CalloraVault {
         env.storage().instance().set(&DataKey::Paused, &true);
         timelock::clear_pending_pause(&env);
         env.events()
-            .publish((events::event_pause_executed(&env), caller), env.ledger().timestamp());
+            .publish((events::event_pause_executed(&env), caller.clone()), env.ledger().timestamp());
         env.events()
             .publish((events::event_vault_paused(&env), caller), ());
         Ok(())
@@ -906,7 +982,7 @@ impl CalloraVault {
                 events::event_pause_cancelled(&env),
                 caller.clone(),
             ),
-            (existing.is_some()),
+            existing.is_some(),
         );
         Ok(())
     }
@@ -991,7 +1067,7 @@ impl CalloraVault {
                 events::event_upgrade_cancelled(&env),
                 caller.clone(),
             ),
-            (existing.is_some()),
+            existing.is_some(),
         );
         Ok(())
     }
@@ -1060,7 +1136,7 @@ impl CalloraVault {
             .instance()
             .get(&DataKey::UsdcToken)
             .ok_or(VaultError::NotInitialized)?;
-        let usdc = token::Client::new(&env, &usdc_addr);
+        let usdc = token_client::Client::new(&env, &usdc_addr);
         if usdc.balance(&env.current_contract_address()) < proposal.amount {
             return Err(VaultError::InsufficientBalance);
         }
@@ -1099,7 +1175,7 @@ impl CalloraVault {
                 events::event_sweep_cancelled(&env),
                 caller.clone(),
             ),
-            (existing.is_some()),
+            existing.is_some(),
         );
         Ok(())
     }
@@ -1171,50 +1247,55 @@ impl CalloraVault {
         Ok(())
     }
 
+    /// Return the currently stored contract WASM hash, or `None` if no
+    /// upgrade has been applied yet (i.e. the `ContractVersion` storage key
+    /// has not been written).
+    pub fn get_version(env: Env) -> Option<BytesN<32>> {
+        env.storage()
+            .instance()
+            .get(&StorageKey::ContractVersion)
+    }
+
     /// Return the reserve cap for `token`.
     ///
     /// Returns `i128::MAX` when no cap has been configured (effectively unlimited).
     pub fn get_reserve_cap(env: Env, token: Address) -> i128 {
         limits::get(&env, &token)
     }
+
+    /// Read-only preview of the untracked on-ledger USDC the vault holds
+    /// above its internal tracked balance.
+    ///
+    /// No authentication required. Does not write storage or bump TTL.
+    ///
+    /// # Errors
+    /// - [`VaultError::NotInitialized`] if `init` has not been called.
+    pub fn dry_run_sweep_idle_balance(env: Env) -> Result<views::SweepPreview, VaultError> {
+        views::compute_sweep_preview(&env)
+    }
 }
 
 pub mod capabilities;
 mod cold_storage;
-mod events;
+mod errors;
+pub use errors::VaultError;
 pub mod limits;
 pub mod rate_limit;
+pub mod timelock;
 
-// #[cfg(test)]
-// #[path = "../proofs/deduct.rs"]
-// mod deduct_proofs;
+pub use timelock::{
+    DEFAULT_TIMELOCK_SECONDS, MAX_TIMELOCK_SECONDS, MIN_TIMELOCK_SECONDS,
+};
 
 // ---------------------------------------------------------------------------
 // Test modules
 // ---------------------------------------------------------------------------
 
-// #[cfg(test)]
-// mod test;
-
-// NOTE: The following test modules expect a richer contract API (DeductItem,
-// Option<Symbol> request IDs, get_meta, DEFAULT_MIN_DEPOSIT, etc.) that the
-// current simplified vault does not expose. They are commented out until the
-// vault API is migrated.
-//
-// #[cfg(test)]
-// mod test_settler_validation;
-
-// #[cfg(test)]
-// mod test_views;
-
-// #[cfg(test)]
-// mod test_idempotency;
-
-// #[cfg(test)]
-// mod test_error_codes;
-
-// #[cfg(test)]
-// mod test_reentrancy;
+#[cfg(test)]
+pub mod test {
+    pub use super::CalloraVault;
+    pub use super::CalloraVaultClient;
+}
 
 #[cfg(test)]
 mod test_sweep_idle_balance;
@@ -1222,7 +1303,11 @@ mod test_sweep_idle_balance;
 #[cfg(test)]
 mod test_access_control_matrix;
 
-// #[cfg(test)]
+#[cfg(test)]
+mod test_timelock;
+
+#[cfg(test)]
+mod test_events;
 // mod test_gas_budget;
 // #[cfg(test)]
 // mod test_rate_limit;
